@@ -28,7 +28,7 @@ class ConcurrencyTracker:
 
     def decrement(self) -> None:
         with self._lock:
-            self._active -= 1
+            self._active = max(0, self._active - 1)
 
     def sample(self) -> None:
         """Record the current concurrency level."""

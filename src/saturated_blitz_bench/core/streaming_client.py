@@ -63,6 +63,8 @@ class StreamingClient:
         if tools:
             payload["tools"] = tools
 
+        max_buffer = 1_048_576  # 1 MB safety limit
+
         async with self._client.stream(
             "POST",
             self.completions_url,
@@ -72,6 +74,10 @@ class StreamingClient:
             buffer = ""
             async for raw_bytes in response.aiter_bytes():
                 buffer += raw_bytes.decode("utf-8", errors="replace")
+                if len(buffer) > max_buffer:
+                    logger.warning("SSE buffer exceeded %d bytes, dropping", max_buffer)
+                    buffer = ""
+                    continue
                 while "\n" in buffer:
                     line, buffer = buffer.split("\n", 1)
                     line = line.strip()
@@ -86,3 +92,13 @@ class StreamingClient:
                             yield chunk
                         except json.JSONDecodeError:
                             logger.debug("Failed to parse SSE chunk: %s", json_str)
+
+            # Handle any remaining buffer content after stream ends
+            remaining = buffer.strip()
+            if remaining and remaining != "data: [DONE]" and remaining.startswith("data: "):
+                json_str = remaining[6:]
+                try:
+                    chunk = json.loads(json_str)
+                    yield chunk
+                except json.JSONDecodeError:
+                    logger.debug("Failed to parse final SSE chunk: %s", json_str)

@@ -153,3 +153,61 @@ def test_timeseries_basic():
     ts = compute_timeseries(records, benchmark_start=100.0, bucket_seconds=10.0)
     assert len(ts) > 0
     assert ts[0]["time_offset"] == 0.0
+
+
+def test_aggregate_metrics_all_errors():
+    records = [
+        _make_record(status="error", sent_at=100.0),
+        _make_record(status="error", sent_at=101.0),
+        _make_record(status="timeout", sent_at=102.0),
+    ]
+    metrics = compute_aggregate_metrics(
+        records, total_duration=10.0, warmup_seconds=0.0, benchmark_start_time=99.0
+    )
+    # No success records → empty metrics
+    assert metrics["total_requests"] == 0
+    assert metrics["system_throughput_tps"] == 0
+
+
+def test_aggregate_metrics_empty_records():
+    metrics = compute_aggregate_metrics(
+        [], total_duration=10.0, warmup_seconds=0.0, benchmark_start_time=99.0
+    )
+    assert metrics["total_requests"] == 0
+    assert metrics["ttft"]["avg"] is None
+
+
+def test_request_record_finalize_no_first_token():
+    """Finalize with no first_token_at leaves ttft=None."""
+    r = RequestRecord(
+        prompt_id="test",
+        category="short_chat",
+        request_sent_at=100.0,
+        input_tokens=100,
+    )
+    r.completed_at = 101.0
+    r.output_tokens = 0
+    r.finalize()
+    assert r.ttft is None
+    assert r.e2e_latency is not None
+    assert abs(r.e2e_latency - 1.0) < 0.001
+    assert r.output_tps is None
+
+
+def test_concurrency_tracker_clamps_to_zero():
+    ct = ConcurrencyTracker()
+    ct.start()
+    assert ct.current == 0
+    ct.decrement()  # Would go negative without clamp
+    assert ct.current == 0
+    ct.decrement()  # Still clamped
+    assert ct.current == 0
+
+
+def test_concurrency_tracker_effective_one_sample():
+    ct = ConcurrencyTracker()
+    ct.start()
+    ct.increment()
+    ct.sample()
+    # < 2 samples → returns 0.0
+    assert ct.effective_concurrency() == 0.0

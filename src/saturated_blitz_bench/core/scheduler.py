@@ -18,8 +18,10 @@ class Scheduler:
     ) -> None:
         self.pool = pool
 
-        # Build category list and weights from whatever categories we actually have
-        available_categories = list(pool.by_category.keys())
+        # Build category list and weights from categories that have prompts
+        available_categories = [
+            cat for cat, prompts in pool.by_category.items() if prompts
+        ]
         if not available_categories:
             raise ValueError("Prompt pool has no prompts")
 

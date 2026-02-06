@@ -7,6 +7,8 @@ import logging
 import time
 from typing import Any
 
+import httpx
+
 from saturated_blitz_bench.config import BenchmarkConfig
 from saturated_blitz_bench.core.scheduler import Scheduler
 from saturated_blitz_bench.core.streaming_client import StreamingClient
@@ -26,9 +28,15 @@ logger = logging.getLogger(__name__)
 class BenchmarkRunner:
     """Runs the saturated-concurrency benchmark loop."""
 
-    def __init__(self, config: BenchmarkConfig, pool: PromptPool) -> None:
+    def __init__(
+        self,
+        config: BenchmarkConfig,
+        pool: PromptPool,
+        dry_run: bool = False,
+    ) -> None:
         self.config = config
         self.pool = pool
+        self.dry_run = dry_run
         self.scheduler = Scheduler(
             pool,
             weights={
@@ -36,11 +44,16 @@ class BenchmarkRunner:
                 for k, v in config.workload.distribution.model_dump().items()
             },
         )
-        self.client = StreamingClient(
-            base_url=config.endpoint.base_url,
-            api_key=config.endpoint.api_key,
-            timeout=config.test.request_timeout,
-        )
+        if dry_run:
+            from saturated_blitz_bench.core.dry_run_client import DryRunClient
+
+            self.client = DryRunClient()
+        else:
+            self.client = StreamingClient(
+                base_url=config.endpoint.base_url,
+                api_key=config.endpoint.api_key,
+                timeout=config.test.request_timeout,
+            )
         self.concurrency_tracker = ConcurrencyTracker()
         self.results: list[RequestRecord] = []
         self._results_lock = asyncio.Lock()
@@ -88,12 +101,21 @@ class BenchmarkRunner:
             # Drain: wait for in-flight requests with generous timeout
             if tasks:
                 drain_timeout = cfg.request_timeout * 2
+                in_flight = sum(1 for t in tasks if not t.done())
                 logger.info(
                     "Draining %d in-flight requests (timeout=%ds)...",
-                    sum(1 for t in tasks if not t.done()),
+                    in_flight,
                     drain_timeout,
                 )
-                await asyncio.wait(tasks, timeout=drain_timeout)
+                done, pending = await asyncio.wait(tasks, timeout=drain_timeout)
+                if pending:
+                    logger.warning(
+                        "Cancelling %d tasks still running after drain timeout",
+                        len(pending),
+                    )
+                    for t in pending:
+                        t.cancel()
+                    await asyncio.gather(*pending, return_exceptions=True)
         finally:
             sampler_task.cancel()
             progress_task.cancel()
@@ -181,7 +203,11 @@ class BenchmarkRunner:
         except httpx.HTTPStatusError as e:
             record.status = "error"
             record.completed_at = time.time()
-            record.error = f"HTTP {e.response.status_code}: {e.response.text[:200]}"
+            try:
+                body = e.response.text[:200]
+            except httpx.ResponseNotRead:
+                body = "(streaming response body not available)"
+            record.error = f"HTTP {e.response.status_code}: {body}"
         except Exception as e:
             record.status = "error"
             record.completed_at = time.time()

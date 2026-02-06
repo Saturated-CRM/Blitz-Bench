@@ -150,6 +150,14 @@ def _count_messages_tokens(messages: list[dict[str, str]], enc: tiktoken.Encodin
     return total
 
 
+def _truncate_text(text: str, max_tokens: int, enc: tiktoken.Encoding) -> str:
+    """Truncate text to at most max_tokens tokens."""
+    tokens = enc.encode(text, disallowed_special=())
+    if len(tokens) <= max_tokens:
+        return text
+    return enc.decode(tokens[:max_tokens])
+
+
 def _make_entry(
     category: str,
     source: str,
@@ -177,6 +185,27 @@ def _make_entry(
 
 
 # ---------------------------------------------------------------------------
+# Tool normalization
+# ---------------------------------------------------------------------------
+
+def _normalize_tools(raw_tools: list[dict]) -> list[dict]:
+    """Ensure tools are in OpenAI format: [{type: "function", function: {...}}]."""
+    normalized: list[dict] = []
+    for t in raw_tools:
+        if not isinstance(t, dict):
+            continue
+        if t.get("type") == "function" and "function" in t:
+            normalized.append(t)  # Already correct format
+        elif "name" in t:
+            # Bare function definition — wrap it
+            normalized.append({"type": "function", "function": t})
+        elif "function" in t:
+            # Has function key but missing type
+            normalized.append({"type": "function", "function": t["function"]})
+    return normalized
+
+
+# ---------------------------------------------------------------------------
 # Source-specific converters
 # ---------------------------------------------------------------------------
 
@@ -194,10 +223,14 @@ def _process_wildchat(
         return results
 
     logger.info("Loading WildChat-1M (streaming)...")
-    ds = load_dataset(
-        "allenai/WildChat-1M", split="train",
-        streaming=True,
-    )
+    try:
+        ds = load_dataset(
+            "allenai/WildChat-1M", split="train",
+            streaming=True,
+        )
+    except Exception as e:
+        logger.warning("WildChat unavailable: %s", e)
+        return results
 
     seen = 0
     for row in tqdm(ds, desc="WildChat", total=needed * 10):
@@ -267,37 +300,42 @@ def _process_hermes_fc(
     target_count: int,
     max_input_tokens: int,
 ) -> list[dict]:
-    """Process NousResearch/hermes-function-calling-v1 for tool_call (primary source).
+    """Process hermes-function-calling-v1-parsed for tool_call (primary source).
 
-    Configs: func_calling_singleturn (1.9K), glaive_func_calling (5.2K), func_calling (1.9K).
-    Format: conversations [{from, value}], tools (JSON string).
+    Pre-parsed OpenAI format: messages [{role, content, tool_calls}], tools (JSON string).
+    Configs: func-calling (1.83K), func-calling-singleturn (1.83K), glaive-function-calling-5k (5.21K).
+    Falls back to raw NousResearch/hermes-function-calling-v1 if parsed version unavailable.
     """
     if target_count <= 0:
         return []
 
     results: list[dict] = []
-    logger.info("Loading Hermes function-calling-v1...")
+    logger.info("Loading hermes-function-calling-v1-parsed...")
 
-    configs = ["func_calling_singleturn", "glaive_func_calling", "func_calling"]
-    for config in configs:
+    # Try pre-parsed version first (clean OpenAI format)
+    configs_parsed = ["func-calling-singleturn", "glaive-function-calling-5k", "func-calling"]
+    used_parsed = False
+
+    for config in configs_parsed:
         if len(results) >= target_count:
             break
         try:
             ds = load_dataset(
-                "NousResearch/hermes-function-calling-v1",
+                "minpeter/hermes-function-calling-v1-parsed",
                 config, split="train",
             )
+            used_parsed = True
         except Exception as e:
-            logger.warning("  Hermes-FC config '%s' unavailable: %s", config, e)
+            logger.warning("  Hermes-FC-parsed config '%s' unavailable: %s", config, e)
             continue
 
-        for row in tqdm(ds, desc=f"Hermes-FC/{config}"):
+        for row in tqdm(ds, desc=f"Hermes-FC-parsed/{config}"):
             if len(results) >= target_count:
                 break
             try:
-                convos = row.get("conversations", [])
+                messages_raw = row.get("messages", [])
                 tools_raw = row.get("tools", "")
-                if not convos:
+                if not messages_raw:
                     continue
 
                 # Parse tools from JSON string
@@ -306,38 +344,37 @@ def _process_hermes_fc(
                     try:
                         parsed_tools = json.loads(tools_raw) if isinstance(tools_raw, str) else tools_raw
                         if isinstance(parsed_tools, list):
-                            tools = parsed_tools
+                            tools = _normalize_tools(parsed_tools)
                     except json.JSONDecodeError:
                         pass
 
-                # Build messages up to the assistant's tool call
+                # Build prompt messages (up to first assistant tool_call)
                 prompt_messages: list[dict[str, str]] = []
                 expected_tool = None
 
-                for msg in convos:
-                    role_raw = msg.get("from", "")
-                    value = msg.get("value", "")
-                    if not value:
-                        continue
+                for msg in messages_raw:
+                    role = msg.get("role", "")
+                    content = msg.get("content", "")
+                    tc = msg.get("tool_calls")
 
-                    if role_raw == "system":
-                        prompt_messages.append({"role": "system", "content": value})
-                    elif role_raw in ("human", "user"):
-                        prompt_messages.append({"role": "user", "content": value})
-                    elif role_raw in ("gpt", "assistant"):
-                        # Check for tool_call in the response
-                        tc_match = re.search(r'<tool_call>\s*(\{.*?\})\s*</tool_call>', value, re.DOTALL)
-                        if tc_match:
+                    if role == "assistant" and tc:
+                        # Extract expected tool from first tool_call
+                        if isinstance(tc, list) and tc:
+                            first_tc = tc[0]
+                            func = first_tc.get("function", {})
+                            args_raw = func.get("arguments", "{}")
                             try:
-                                tc_data = json.loads(tc_match.group(1))
-                                expected_tool = {
-                                    "name": tc_data.get("name", ""),
-                                    "required_args": list(tc_data.get("arguments", {}).keys()),
-                                }
+                                args = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
                             except json.JSONDecodeError:
-                                pass
-                            break  # Stop before assistant response
-                        prompt_messages.append({"role": "assistant", "content": value})
+                                args = {}
+                            expected_tool = {
+                                "name": func.get("name", ""),
+                                "required_args": list(args.keys()) if isinstance(args, dict) else [],
+                            }
+                        break  # Stop before assistant's tool call response
+
+                    if role in ("system", "user", "assistant") and content:
+                        prompt_messages.append({"role": role, "content": content})
 
                 if not prompt_messages or not any(m["role"] == "user" for m in prompt_messages):
                     continue
@@ -349,27 +386,196 @@ def _process_hermes_fc(
                 if 100 <= tok_count <= min(16000, max_input_tokens):
                     results.append(_make_entry(
                         "tool_call", "hermes_fc", prompt_messages, tok_count, 4096,
-                        {"dataset": "NousResearch/hermes-function-calling-v1", "config": config},
+                        {"dataset": "minpeter/hermes-function-calling-v1-parsed", "config": config},
                         tools=tools or None, expected_tool=expected_tool,
                     ))
             except Exception:
                 continue
 
+    # Fallback to raw NousResearch version if parsed unavailable
+    if not used_parsed:
+        logger.info("Falling back to raw NousResearch/hermes-function-calling-v1...")
+        configs_raw = ["func_calling_singleturn", "glaive_func_calling", "func_calling"]
+        for config in configs_raw:
+            if len(results) >= target_count:
+                break
+            try:
+                ds = load_dataset(
+                    "NousResearch/hermes-function-calling-v1",
+                    config, split="train",
+                )
+            except Exception as e:
+                logger.warning("  Hermes-FC raw config '%s' unavailable: %s", config, e)
+                continue
+
+            for row in tqdm(ds, desc=f"Hermes-FC-raw/{config}"):
+                if len(results) >= target_count:
+                    break
+                try:
+                    convos = row.get("conversations", [])
+                    tools_raw = row.get("tools", "")
+                    if not convos:
+                        continue
+
+                    tools: list[dict] = []
+                    if tools_raw:
+                        try:
+                            parsed_tools = json.loads(tools_raw) if isinstance(tools_raw, str) else tools_raw
+                            if isinstance(parsed_tools, list):
+                                tools = _normalize_tools(parsed_tools)
+                        except json.JSONDecodeError:
+                            pass
+
+                    prompt_messages: list[dict[str, str]] = []
+                    expected_tool = None
+
+                    for msg in convos:
+                        role_raw = msg.get("from", "")
+                        value = msg.get("value", "")
+                        if not value:
+                            continue
+
+                        if role_raw == "system":
+                            prompt_messages.append({"role": "system", "content": value})
+                        elif role_raw in ("human", "user"):
+                            prompt_messages.append({"role": "user", "content": value})
+                        elif role_raw in ("gpt", "assistant"):
+                            tc_match = re.search(r'<tool_call>\s*(\{.*?\})\s*</tool_call>', value, re.DOTALL)
+                            if tc_match:
+                                try:
+                                    tc_data = json.loads(tc_match.group(1))
+                                    expected_tool = {
+                                        "name": tc_data.get("name", ""),
+                                        "required_args": list(tc_data.get("arguments", {}).keys()),
+                                    }
+                                except json.JSONDecodeError:
+                                    pass
+                                break
+                            prompt_messages.append({"role": "assistant", "content": value})
+
+                    if not prompt_messages or not any(m["role"] == "user" for m in prompt_messages):
+                        continue
+
+                    tok_count = _count_messages_tokens(prompt_messages, enc)
+                    if tools:
+                        tok_count += _count_tokens(json.dumps(tools), enc)
+
+                    if 100 <= tok_count <= min(16000, max_input_tokens):
+                        results.append(_make_entry(
+                            "tool_call", "hermes_fc", prompt_messages, tok_count, 4096,
+                            {"dataset": "NousResearch/hermes-function-calling-v1", "config": config},
+                            tools=tools or None, expected_tool=expected_tool,
+                        ))
+                except Exception:
+                    continue
+
     logger.info("  Hermes-FC -> tool_call: %d prompts", len(results))
     return results
 
 
-def _process_glaive(
+def _process_toolace(
     enc: tiktoken.Encoding,
     target_count: int,
     max_input_tokens: int,
 ) -> list[dict]:
-    """Process Glaive function-calling-v2 for tool_call category (supplement)."""
+    """Process toolace-parsed for tool_call category (supplement).
+
+    Pre-parsed OpenAI format: messages [{role, content, tool_calls}], tools (JSON string).
+    11.1K rows with proper tool definitions and tool_call responses.
+    Falls back to glaiveai/glaive-function-calling-v2 if unavailable.
+    """
     if target_count <= 0:
         return []
 
     results: list[dict] = []
-    logger.info("Loading Glaive function-calling-v2 (streaming)...")
+    logger.info("Loading toolace-parsed...")
+
+    try:
+        ds = load_dataset("minpeter/toolace-parsed", split="train")
+        logger.info("  toolace-parsed loaded (%d rows)", len(ds))
+
+        for row in tqdm(ds, desc="ToolACE"):
+            if len(results) >= target_count:
+                break
+            try:
+                messages_raw = row.get("messages", [])
+                tools_raw = row.get("tools", "")
+                if not messages_raw:
+                    continue
+
+                # Parse tools
+                tools: list[dict] = []
+                if tools_raw:
+                    try:
+                        parsed_tools = json.loads(tools_raw) if isinstance(tools_raw, str) else tools_raw
+                        if isinstance(parsed_tools, list):
+                            tools = _normalize_tools(parsed_tools)
+                    except json.JSONDecodeError:
+                        pass
+
+                if not tools:
+                    continue  # Tool call prompts must have tool definitions
+
+                # Build prompt messages up to first assistant tool_call
+                prompt_messages: list[dict[str, str]] = []
+                expected_tool = None
+
+                for msg in messages_raw:
+                    role = msg.get("role", "")
+                    content = msg.get("content", "")
+                    tc = msg.get("tool_calls")
+
+                    if role == "assistant" and tc:
+                        # Extract expected tool from first tool_call
+                        if isinstance(tc, list) and tc:
+                            first_tc = tc[0]
+                            func = first_tc.get("function", {})
+                            args_raw = func.get("arguments", "{}")
+                            try:
+                                args = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
+                            except json.JSONDecodeError:
+                                args = {}
+                            expected_tool = {
+                                "name": func.get("name", ""),
+                                "required_args": list(args.keys()) if isinstance(args, dict) else [],
+                            }
+                        break
+
+                    if role in ("system", "user", "assistant") and content:
+                        prompt_messages.append({"role": role, "content": content})
+
+                if not prompt_messages or not any(m["role"] == "user" for m in prompt_messages):
+                    continue
+
+                tok_count = _count_messages_tokens(prompt_messages, enc)
+                if tools:
+                    tok_count += _count_tokens(json.dumps(tools), enc)
+
+                if 100 <= tok_count <= min(16000, max_input_tokens):
+                    results.append(_make_entry(
+                        "tool_call", "toolace", prompt_messages, tok_count, 4096,
+                        {"dataset": "minpeter/toolace-parsed"},
+                        tools=tools, expected_tool=expected_tool,
+                    ))
+            except Exception:
+                continue
+
+    except Exception as e:
+        logger.warning("  toolace-parsed unavailable: %s — falling back to Glaive", e)
+        results.extend(_process_glaive_fallback(enc, target_count, max_input_tokens))
+
+    logger.info("  ToolACE -> tool_call: %d prompts", len(results))
+    return results
+
+
+def _process_glaive_fallback(
+    enc: tiktoken.Encoding,
+    target_count: int,
+    max_input_tokens: int,
+) -> list[dict]:
+    """Fallback: process Glaive function-calling-v2 for tool_call."""
+    results: list[dict] = []
+    logger.info("Loading Glaive function-calling-v2 (fallback, streaming)...")
 
     try:
         ds = load_dataset(
@@ -380,7 +586,7 @@ def _process_glaive(
         logger.warning("  Glaive unavailable: %s", e)
         return results
 
-    for row in tqdm(ds, desc="Glaive", total=target_count * 5):
+    for row in tqdm(ds, desc="Glaive-fallback", total=target_count * 5):
         if len(results) >= target_count:
             break
         try:
@@ -393,22 +599,17 @@ def _process_glaive(
             if system_prompt:
                 messages.append({"role": "system", "content": system_prompt})
 
-            # Try to extract tool schemas from system prompt
             tools: list[dict] = []
             try:
                 for match in re.findall(r'\[[\s\S]*?\]', system_prompt):
                     parsed = json.loads(match)
                     if isinstance(parsed, list) and parsed and "name" in str(parsed[0]):
-                        tools = [
-                            {"type": "function", "function": f} if "type" not in f else f
-                            for f in parsed
-                        ]
+                        tools = _normalize_tools(parsed)
                         break
             except (json.JSONDecodeError, Exception):
                 pass
 
             parts = chat_text.split("USER: ")
-            found_fc = False
             for part in parts[1:]:
                 if "ASSISTANT: " not in part:
                     messages.append({"role": "user", "content": part.strip()})
@@ -418,15 +619,12 @@ def _process_glaive(
 
                 if "<functioncall>" in rest:
                     fc_start = rest.index("<functioncall>") + len("<functioncall>")
-                    # Find the end of the JSON object more robustly
                     fc_text = rest[fc_start:]
-                    # Try to find closing tag or end of line
                     for end_marker in ("</functioncall>", "</", "\n\n", "\nFUNCTION"):
                         if end_marker in fc_text:
                             fc_text = fc_text[:fc_text.index(end_marker)]
                             break
                     fc_text = fc_text.strip()
-                    # Handle single-quoted JSON (common in Glaive)
                     try:
                         fc_json = json.loads(fc_text)
                     except json.JSONDecodeError:
@@ -447,24 +645,12 @@ def _process_glaive(
                             {"dataset": "glaiveai/glaive-function-calling-v2"},
                             tools=tools or None, expected_tool=expected_tool,
                         ))
-                    found_fc = True
                     break
                 messages.append({"role": "assistant", "content": rest.strip()})
-
-            # If no functioncall tag found, still usable as a tool_call prompt
-            # (the system prompt has tool definitions, we just lack expected_tool)
-            if not found_fc and tools and len(messages) >= 2:
-                tok_count = _count_messages_tokens(messages, enc)
-                if 100 <= tok_count <= min(16000, max_input_tokens):
-                    results.append(_make_entry(
-                        "tool_call", "glaive", messages, tok_count, 4096,
-                        {"dataset": "glaiveai/glaive-function-calling-v2"},
-                        tools=tools,
-                    ))
         except Exception:
             continue
 
-    logger.info("  Glaive -> tool_call: %d prompts", len(results))
+    logger.info("  Glaive-fallback -> tool_call: %d prompts", len(results))
     return results
 
 
@@ -529,6 +715,8 @@ def _process_longbench(
             logger.warning("  LongBench/%s unavailable: %s", subset, e)
             continue
 
+        max_tok = min(70000, max_input_tokens)
+
         for row in tqdm(ds, desc=f"LongBench/{subset}"):
             if len(results) >= target_count:
                 break
@@ -536,6 +724,12 @@ def _process_longbench(
             question = row.get("input", "")
             if not context or not question:
                 continue
+
+            # Truncate oversized context
+            ctx_tok = _count_tokens(context, enc)
+            if ctx_tok > max_tok - 50:
+                target_tok = random.randint(22000, max_tok - 2000)
+                context = _truncate_text(context, target_tok, enc)
 
             if subset == "gov_report":
                 user_content = f"{context}\n\n---\n\nPlease provide a comprehensive summary of the above report."
@@ -549,7 +743,7 @@ def _process_longbench(
                 {"role": "user", "content": user_content},
             ]
             tok_count = _count_messages_tokens(messages, enc)
-            if 20000 <= tok_count <= min(70000, max_input_tokens):
+            if 20000 <= tok_count <= max_tok:
                 results.append(_make_entry(
                     "long_context", "longbench", messages, tok_count, 2048,
                     {"dataset": f"THUDM/LongBench/{subset}"},
@@ -577,6 +771,8 @@ def _process_longbench_v2(
         logger.warning("  LongBench-v2 unavailable: %s", e)
         return results
 
+    max_tok = min(70000, max_input_tokens)
+
     for row in tqdm(ds, desc="LongBench-v2"):
         if len(results) >= target_count:
             break
@@ -585,13 +781,19 @@ def _process_longbench_v2(
         if not context or not question:
             continue
 
+        # Truncate oversized context
+        ctx_tok = _count_tokens(context, enc)
+        if ctx_tok > max_tok - 50:
+            target_tok = random.randint(22000, max_tok - 2000)
+            context = _truncate_text(context, target_tok, enc)
+
         user_content = f"{context}\n\n---\n\nBased on the above text, please answer: {question}"
         messages = [
             {"role": "system", "content": "You are a helpful assistant. Provide a detailed answer based on the context."},
             {"role": "user", "content": user_content},
         ]
         tok_count = _count_messages_tokens(messages, enc)
-        if 20000 <= tok_count <= min(70000, max_input_tokens):
+        if 20000 <= tok_count <= max_tok:
             results.append(_make_entry(
                 "long_context", "longbench_v2", messages, tok_count, 2048,
                 {"dataset": "THUDM/LongBench-v2"},
@@ -601,64 +803,221 @@ def _process_longbench_v2(
     return results
 
 
-def _process_longalign(
+def _process_scrolls(
     enc: tiktoken.Encoding,
     target_count: int,
     max_input_tokens: int,
 ) -> list[dict]:
-    """Process THUDM/LongAlign-10k for long_context category.
+    """Process tau/scrolls for long_context category.
 
-    9,888 examples with `length` field (8K-64K tokens).
-    Messages are in [{role, content}] format.
+    English-only datasets with long documents:
+    - gov_report: CRS government reports (973 test docs, many 10K-50K+ tokens)
+    - narrative_qa: Full Gutenberg books / movie scripts for QA (65 test docs, very long)
+    - qmsum: Meeting transcripts (232 test docs)
     """
     if target_count <= 0:
         return []
 
     results: list[dict] = []
-    logger.info("Loading LongAlign-10k...")
 
-    try:
-        ds = load_dataset("THUDM/LongAlign-10k", split="train")
-    except Exception as e:
-        logger.warning("  LongAlign-10k unavailable: %s", e)
-        return results
+    configs = [
+        ("gov_report", "Provide a comprehensive summary of the above report."),
+        ("narrative_qa", "Based on the above text, please answer the question."),
+        ("qmsum", "Summarize the key points from the above meeting transcript."),
+    ]
 
-    for row in tqdm(ds, desc="LongAlign"):
+    for config_name, default_task in configs:
         if len(results) >= target_count:
             break
+        logger.info("  Loading tau/scrolls/%s...", config_name)
         try:
-            length = row.get("length", 0)
-            # Quick pre-filter using the length field (total conversation length)
-            # We want user input in 20K-70K range; the length includes assistant
-            # response, so filter generously and measure accurately below
-            if length < 15000:
+            # Try test split first (most configs have test), fall back to validation
+            for split in ("test", "validation", "train"):
+                try:
+                    ds = load_dataset("tau/scrolls", config_name, split=split)
+                    break
+                except Exception:
+                    continue
+            else:
+                logger.warning("  scrolls/%s: no usable split found", config_name)
                 continue
-
-            raw_messages = row.get("messages", [])
-            if not raw_messages:
-                continue
-
-            # Take only user messages as the prompt
-            prompt_messages: list[dict[str, str]] = []
-            for msg in raw_messages:
-                role = msg.get("role", "")
-                content = msg.get("content", "")
-                if role == "user" and content:
-                    prompt_messages.append({"role": "user", "content": content})
-
-            if not prompt_messages:
-                continue
-
-            tok_count = _count_messages_tokens(prompt_messages, enc)
-            if 20000 <= tok_count <= min(70000, max_input_tokens):
-                results.append(_make_entry(
-                    "long_context", "longalign", prompt_messages, tok_count, 2048,
-                    {"dataset": "THUDM/LongAlign-10k"},
-                ))
-        except Exception:
+        except Exception as e:
+            logger.warning("  scrolls/%s unavailable: %s", config_name, e)
             continue
 
-    logger.info("  LongAlign -> long_context: %d prompts", len(results))
+        max_tok = min(70000, max_input_tokens)
+
+        for row in tqdm(ds, desc=f"scrolls/{config_name}"):
+            if len(results) >= target_count:
+                break
+            try:
+                text = row.get("input", "")
+                if not text or len(text) < 25000:  # ~7K tokens pre-filter
+                    continue
+
+                # Truncate oversized documents to fit the token window
+                text_tok = _count_tokens(text, enc)
+                if text_tok > max_tok - 50:  # Leave room for message overhead
+                    target_tok = random.randint(22000, max_tok - 2000)
+                    text = _truncate_text(text, target_tok, enc)
+
+                # Build prompt
+                if config_name == "gov_report":
+                    user_content = f"{text}\n\n---\n\nPlease provide a comprehensive summary of the above government report."
+                elif config_name == "narrative_qa":
+                    user_content = f"{text}\n\n---\n\n{default_task}"
+                else:
+                    user_content = f"{text}\n\n---\n\n{default_task}"
+
+                messages = [
+                    {"role": "system", "content": "You are a helpful assistant. Provide a detailed answer based on the provided context."},
+                    {"role": "user", "content": user_content},
+                ]
+                tok_count = _count_messages_tokens(messages, enc)
+                if 20000 <= tok_count <= max_tok:
+                    results.append(_make_entry(
+                        "long_context", "scrolls", messages, tok_count, 2048,
+                        {"dataset": f"tau/scrolls/{config_name}"},
+                    ))
+            except Exception:
+                continue
+
+    logger.info("  scrolls -> long_context: %d prompts", len(results))
+    return results
+
+
+def _process_govreport(
+    enc: tiktoken.Encoding,
+    target_count: int,
+    max_input_tokens: int,
+) -> list[dict]:
+    """Process ccdv/govreport-summarization for long_context category.
+
+    17.5K train + 973 validation + 973 test government reports.
+    Average ~10K tokens, many exceed 20K-50K+ tokens.
+    """
+    if target_count <= 0:
+        return []
+
+    results: list[dict] = []
+    max_tok = min(70000, max_input_tokens)
+
+    for split in ("train", "validation", "test"):
+        if len(results) >= target_count:
+            break
+        logger.info("  Loading govreport/%s...", split)
+        try:
+            ds = load_dataset(
+                "ccdv/govreport-summarization", "document", split=split,
+            )
+        except Exception as e:
+            logger.warning("  govreport/%s unavailable: %s", split, e)
+            continue
+
+        for row in tqdm(ds, desc=f"govreport/{split}"):
+            if len(results) >= target_count:
+                break
+            try:
+                report = row.get("report", "")
+                if not report or len(report) < 25000:  # ~7K tokens pre-filter
+                    continue
+
+                # Truncate oversized reports
+                report_tok = _count_tokens(report, enc)
+                if report_tok > max_tok - 50:
+                    target_tok = random.randint(22000, max_tok - 2000)
+                    report = _truncate_text(report, target_tok, enc)
+                elif report_tok < 19950:
+                    continue
+
+                user_content = (
+                    f"{report}\n\n---\n\n"
+                    "Please provide a comprehensive summary of the above government report, "
+                    "covering the key findings, recommendations, and conclusions."
+                )
+                messages = [
+                    {"role": "system", "content": "You are a helpful assistant. Provide a detailed answer based on the provided context."},
+                    {"role": "user", "content": user_content},
+                ]
+                tok_count = _count_messages_tokens(messages, enc)
+                if 20000 <= tok_count <= max_tok:
+                    results.append(_make_entry(
+                        "long_context", "govreport", messages, tok_count, 2048,
+                        {"dataset": "ccdv/govreport-summarization", "split": split},
+                    ))
+            except Exception:
+                continue
+
+    logger.info("  govreport -> long_context: %d prompts", len(results))
+    return results
+
+
+def _process_pg19(
+    enc: tiktoken.Encoding,
+    target_count: int,
+    max_input_tokens: int,
+) -> list[dict]:
+    """Process deepmind/pg19 for long_context category.
+
+    Project Gutenberg books (pre-1919). 100 test + 50 validation books,
+    average ~69K tokens per book. Train set has 28K+ books.
+    """
+    if target_count <= 0:
+        return []
+
+    results: list[dict] = []
+    max_tok = min(70000, max_input_tokens)
+
+    for split in ("test", "validation", "train"):
+        if len(results) >= target_count:
+            break
+        logger.info("  Loading pg19/%s...", split)
+        try:
+            ds = load_dataset("deepmind/pg19", split=split, streaming=(split == "train"))
+        except Exception as e:
+            logger.warning("  pg19/%s unavailable: %s", split, e)
+            continue
+
+        seen = 0
+        for row in tqdm(ds, desc=f"pg19/{split}", total=target_count * 3 if split == "train" else None):
+            if len(results) >= target_count:
+                break
+            seen += 1
+            if split == "train" and seen > target_count * 5:
+                break
+            try:
+                text = row.get("text", "")
+                title = row.get("short_book_title", "unknown")
+                if not text or len(text) < 25000:
+                    continue
+
+                # Truncate to fit the token window
+                text_tok = _count_tokens(text, enc)
+                if text_tok > max_tok - 50:
+                    target_tok = random.randint(22000, max_tok - 2000)
+                    text = _truncate_text(text, target_tok, enc)
+                elif text_tok < 19950:
+                    continue
+
+                user_content = (
+                    f"{text}\n\n---\n\n"
+                    "Based on the passage above, provide a detailed summary covering "
+                    "the main themes, characters, and key events."
+                )
+                messages = [
+                    {"role": "system", "content": "You are a helpful literary assistant. Provide thoughtful analysis based on the text."},
+                    {"role": "user", "content": user_content},
+                ]
+                tok_count = _count_messages_tokens(messages, enc)
+                if 20000 <= tok_count <= max_tok:
+                    results.append(_make_entry(
+                        "long_context", "pg19", messages, tok_count, 2048,
+                        {"dataset": "deepmind/pg19", "title": title},
+                    ))
+            except Exception:
+                continue
+
+    logger.info("  pg19 -> long_context: %d prompts", len(results))
     return results
 
 
@@ -837,10 +1196,12 @@ def build_dataset(
 
     Dataset sources:
       - WildChat-1M: short_chat, medium_chat, multi_turn, reasoning (keyword)
-      - NousResearch hermes-function-calling-v1: tool_call (primary, 11.5K)
-      - Glaive function-calling-v2: tool_call (supplement, 113K)
+      - hermes-function-calling-v1-parsed: tool_call (primary, 8.9K, OpenAI format)
+      - toolace-parsed: tool_call (supplement, 11.1K, OpenAI format)
       - OpenAI GSM8K: reasoning (dedicated math/logic, 7.4K)
-      - THUDM LongAlign-10k: long_context (primary, 9.9K, 8K-64K tokens)
+      - ccdv/govreport-summarization: long_context (primary, 19K gov reports)
+      - deepmind/pg19: long_context (Project Gutenberg books, 28K+)
+      - tau/scrolls: long_context (gov reports, books, transcripts)
       - THUDM LongBench + LongBench-v2: long_context (supplement)
       - deepmind code_contests: code_generation (primary, 3.7K)
       - SWE-bench SWE-smith-trajectories: code_generation (supplement)
@@ -893,30 +1254,40 @@ def build_dataset(
         all_prompts["reasoning"].extend(
             _process_gsm8k(enc, fetch_targets.get("reasoning", 0)))
 
-    # ---- Hermes-FC (tool_call primary — 60%) ----
+    # ---- Hermes-FC parsed (tool_call primary — 55%) ----
     if "tool_call" in cats:
         all_prompts["tool_call"].extend(
-            _process_hermes_fc(enc, int(fetch_targets["tool_call"] * 0.60), max_input_tokens))
+            _process_hermes_fc(enc, int(fetch_targets["tool_call"] * 0.55), max_input_tokens))
 
-    # ---- Glaive (tool_call supplement — 40%) ----
+    # ---- ToolACE parsed (tool_call supplement — 45%) ----
     if "tool_call" in cats:
         all_prompts["tool_call"].extend(
-            _process_glaive(enc, int(fetch_targets["tool_call"] * 0.40), max_input_tokens))
+            _process_toolace(enc, int(fetch_targets["tool_call"] * 0.45), max_input_tokens))
 
-    # ---- LongAlign-10k (long_context primary — 60%) ----
+    # ---- govreport (long_context primary — 35%) ----
     if "long_context" in cats:
         all_prompts["long_context"].extend(
-            _process_longalign(enc, int(fetch_targets["long_context"] * 0.60), max_input_tokens))
+            _process_govreport(enc, int(fetch_targets["long_context"] * 0.35), max_input_tokens))
 
-    # ---- LongBench (long_context supplement — 25%) ----
+    # ---- pg19 books (long_context — 25%) ----
     if "long_context" in cats:
         all_prompts["long_context"].extend(
-            _process_longbench(enc, int(fetch_targets["long_context"] * 0.25), max_input_tokens))
+            _process_pg19(enc, int(fetch_targets["long_context"] * 0.25), max_input_tokens))
 
-    # ---- LongBench-v2 (long_context supplement — 15%) ----
+    # ---- tau/scrolls (long_context — 20%) ----
     if "long_context" in cats:
         all_prompts["long_context"].extend(
-            _process_longbench_v2(enc, int(fetch_targets["long_context"] * 0.15), max_input_tokens))
+            _process_scrolls(enc, int(fetch_targets["long_context"] * 0.20), max_input_tokens))
+
+    # ---- LongBench (long_context — 12%) ----
+    if "long_context" in cats:
+        all_prompts["long_context"].extend(
+            _process_longbench(enc, int(fetch_targets["long_context"] * 0.12), max_input_tokens))
+
+    # ---- LongBench-v2 (long_context — 8%) ----
+    if "long_context" in cats:
+        all_prompts["long_context"].extend(
+            _process_longbench_v2(enc, int(fetch_targets["long_context"] * 0.08), max_input_tokens))
 
     # ---- code_contests (code_generation primary — 60%) ----
     if "code_generation" in cats:

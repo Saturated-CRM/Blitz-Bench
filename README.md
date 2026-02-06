@@ -11,6 +11,7 @@ pip install saturated-blitz-bench
 
 # Build the dataset (first time only)
 saturated-blitz-bench build-dataset
+saturated-blitz-bench build-dataset --force
 
 # Run benchmark
 saturated-blitz-bench run \

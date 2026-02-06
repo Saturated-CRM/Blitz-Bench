@@ -79,7 +79,24 @@ def load_prompt_pool(path: str | Path) -> PromptPool:
                 if line:
                     raw.append(json.loads(line))
 
-    prompts = [Prompt(entry) for entry in raw]
+    prompts: list[Prompt] = []
+    skipped = 0
+    for i, entry in enumerate(raw):
+        try:
+            prompts.append(Prompt(entry))
+        except (KeyError, TypeError) as e:
+            skipped += 1
+            logger.warning("Skipping invalid prompt at index %d: %s", i, e)
+
+    if not prompts:
+        raise ValueError(
+            f"No valid prompts loaded from {path} "
+            f"({len(raw)} entries, {skipped} skipped due to errors)"
+        )
+
+    if skipped:
+        logger.warning("Skipped %d invalid entries out of %d total", skipped, len(raw))
+
     pool = PromptPool(prompts)
 
     logger.info(

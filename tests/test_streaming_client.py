@@ -107,3 +107,85 @@ async def test_stream_handles_empty_lines():
         await client.close()
 
     assert len(received) == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_handles_http_error():
+    """Streaming client raises HTTPStatusError on 500 response."""
+    with respx.mock:
+        respx.post("https://test.example.com/v1/chat/completions").mock(
+            return_value=httpx.Response(500, text="Internal Server Error")
+        )
+
+        client = StreamingClient(base_url="https://test.example.com/v1", timeout=10.0)
+        with pytest.raises(httpx.HTTPStatusError):
+            async for _ in client.stream_chat_completion(
+                messages=[{"role": "user", "content": "Hi"}],
+                model="test-model",
+            ):
+                pass
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_stream_handles_leftover_buffer():
+    """Data at end of stream without trailing newline is still yielded."""
+    # No trailing newline after [DONE], and final data line has no \n
+    sse_body = (
+        'data: {"choices":[{"delta":{"content":"hello"}}]}\n\n'
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"completion_tokens":1}}'
+    )
+
+    with respx.mock:
+        respx.post("https://test.example.com/v1/chat/completions").mock(
+            return_value=httpx.Response(
+                200,
+                content=sse_body.encode(),
+                headers={"content-type": "text/event-stream"},
+            )
+        )
+
+        client = StreamingClient(base_url="https://test.example.com/v1", timeout=10.0)
+        received = []
+        async for chunk in client.stream_chat_completion(
+            messages=[{"role": "user", "content": "test"}],
+            model="test-model",
+        ):
+            received.append(chunk)
+        await client.close()
+
+    # Both chunks should be received (first from normal parsing, second from leftover buffer)
+    assert len(received) == 2
+    assert received[1]["usage"]["completion_tokens"] == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_handles_malformed_json():
+    """Malformed JSON in SSE line is skipped, valid chunks still yielded."""
+    sse_body = (
+        'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n'
+        "data: {not valid json}\n\n"
+        'data: {"choices":[{"delta":{"content":"!!"}}]}\n\n'
+        "data: [DONE]\n\n"
+    )
+
+    with respx.mock:
+        respx.post("https://test.example.com/v1/chat/completions").mock(
+            return_value=httpx.Response(
+                200,
+                content=sse_body.encode(),
+                headers={"content-type": "text/event-stream"},
+            )
+        )
+
+        client = StreamingClient(base_url="https://test.example.com/v1", timeout=10.0)
+        received = []
+        async for chunk in client.stream_chat_completion(
+            messages=[{"role": "user", "content": "test"}],
+            model="test-model",
+        ):
+            received.append(chunk)
+        await client.close()
+
+    # Only the two valid chunks should be received
+    assert len(received) == 2

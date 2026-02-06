@@ -1,5 +1,7 @@
 """Tests for the prompt scheduler."""
 
+import pytest
+
 from saturated_blitz_bench.core.scheduler import Scheduler
 from saturated_blitz_bench.workload.loader import Prompt, PromptPool
 
@@ -63,3 +65,22 @@ def test_scheduler_handles_missing_weights():
     scheduler = Scheduler(pool, weights={"short_chat": 1.0})
     prompt = scheduler.select()
     assert prompt.category == "short_chat"
+
+
+def test_scheduler_empty_pool_raises():
+    pool = PromptPool([])
+    with pytest.raises(ValueError, match="no prompts"):
+        Scheduler(pool)
+
+
+def test_scheduler_all_zero_weights_fallback():
+    pool = _make_pool()
+    # All zero weights should fall back to equal distribution
+    scheduler = Scheduler(pool, weights={"short_chat": 0.0, "tool_call": 0.0})
+    counts = {"short_chat": 0, "tool_call": 0}
+    for _ in range(200):
+        prompt = scheduler.select()
+        counts[prompt.category] += 1
+    # Both categories should get some selections with equal weights
+    assert counts["short_chat"] > 30
+    assert counts["tool_call"] > 30

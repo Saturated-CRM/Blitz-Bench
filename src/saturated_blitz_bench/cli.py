@@ -43,6 +43,7 @@ def main() -> None:
 @click.option("--output-dir", type=str, help="Report output directory")
 @click.option("--format", "output_format", type=click.Choice(["html", "json", "both"]))
 @click.option("--verbose", is_flag=True, help="Enable debug logging")
+@click.option("--dry-run", is_flag=True, help="Simulate benchmark without real LLM requests")
 def run(
     base_url: str | None,
     api_key: str | None,
@@ -60,6 +61,7 @@ def run(
     output_dir: str | None,
     output_format: str | None,
     verbose: bool,
+    dry_run: bool,
 ) -> None:
     """Run the saturated-concurrency benchmark."""
     setup_logging(verbose)
@@ -97,10 +99,11 @@ def run(
 
     config = load_config(config_path, overrides)
 
+    mode_label = " [DRY RUN]" if dry_run else ""
     console.print(
-        f"\n[bold red]saturated-blitz-bench[/bold red] v{__version__}\n"
+        f"\n[bold red]saturated-blitz-bench[/bold red] v{__version__}{mode_label}\n"
         f"  Model:       {config.endpoint.model}\n"
-        f"  Endpoint:    {config.endpoint.base_url}\n"
+        f"  Endpoint:    {'(simulated)' if dry_run else config.endpoint.base_url}\n"
         f"  Concurrency: {config.test.max_concurrency}\n"
         f"  Duration:    {format_duration(config.test.duration_seconds)}\n"
         f"  Warm-up:     {config.test.warmup_seconds}s\n"
@@ -116,7 +119,7 @@ def run(
     console.print(f"  Prompts:     {pool.size} loaded\n")
 
     # Run benchmark
-    runner = BenchmarkRunner(config, pool)
+    runner = BenchmarkRunner(config, pool, dry_run=dry_run)
     start_time = time.time()
 
     try:
