@@ -29,7 +29,7 @@ except ImportError:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build the saturated-blitz-bench prompt pool")
-    parser.add_argument("--output", default="prompts/workload_pool.json")
+    parser.add_argument("--output", default="prompts/workload_pool.jsonl")
     parser.add_argument("--total-prompts", type=int, default=5000)
     parser.add_argument("--max-input-tokens", type=int, default=80000)
     parser.add_argument("--tokenizer", default="cl100k_base")

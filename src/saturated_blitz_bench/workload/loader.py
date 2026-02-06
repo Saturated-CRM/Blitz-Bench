@@ -57,7 +57,7 @@ class PromptPool:
 
 
 def load_prompt_pool(path: str | Path) -> PromptPool:
-    """Load the workload pool JSON and return a PromptPool."""
+    """Load the workload pool (JSONL or JSON) and return a PromptPool."""
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(
@@ -65,8 +65,19 @@ def load_prompt_pool(path: str | Path) -> PromptPool:
             "Run `saturated-blitz-bench build-dataset` first."
         )
 
+    raw: list[dict[str, Any]] = []
     with open(path) as f:
-        raw: list[dict[str, Any]] = json.load(f)
+        first_char = f.read(1)
+        f.seek(0)
+        if first_char == "[":
+            # Legacy JSON array format
+            raw = json.load(f)
+        else:
+            # JSONL format (one JSON object per line)
+            for line in f:
+                line = line.strip()
+                if line:
+                    raw.append(json.loads(line))
 
     prompts = [Prompt(entry) for entry in raw]
     pool = PromptPool(prompts)

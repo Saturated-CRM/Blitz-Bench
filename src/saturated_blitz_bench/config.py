@@ -49,7 +49,7 @@ class WorkloadDistribution(BaseModel):
 
 
 class WorkloadConfig(BaseModel):
-    prompt_pool: str = "prompts/workload_pool.json"
+    prompt_pool: str = "prompts/workload_pool.jsonl"
     distribution: WorkloadDistribution = WorkloadDistribution()
 
 

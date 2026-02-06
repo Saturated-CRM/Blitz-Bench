@@ -150,7 +150,7 @@ def run(
 
 
 @main.command("build-dataset")
-@click.option("--output", default="prompts/workload_pool.json", help="Output path")
+@click.option("--output", default="prompts/workload_pool.jsonl", help="Output path")
 @click.option("--total-prompts", default=5000, type=int, help="Total prompts to generate")
 @click.option("--max-input-tokens", default=80000, type=int, help="Max input tokens")
 @click.option("--tokenizer", default="cl100k_base", help="Tiktoken encoding")

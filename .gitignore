@@ -16,6 +16,7 @@ reports/*.json
 reports/*.csv
 !reports/.gitkeep
 
+prompts/workload_pool.jsonl
 prompts/workload_pool.json
 prompts/workload_pool_stats.json
 
