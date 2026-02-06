@@ -2,6 +2,25 @@
 
 AI inference provider stress benchmark — saturated concurrency, realistic workloads, streaming-first metrics.
 
+## Quick Setup (First Time)
+
+```bash
+# 1. Create and activate virtual environment
+python3 -m venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+
+# 2. Install dependencies
+pip install -e ".[all]"
+
+# 3. Build the dataset (first time only)
+saturated-blitz-bench build-dataset --force
+
+# 4. Test it works
+saturated-blitz-bench run --dry-run
+```
+
+---
+
 ## What This Is
 
 A stress benchmark for AI inference providers. Unlike academic quality benchmarks, this measures operational performance: can your deployment handle the load?
@@ -14,15 +33,53 @@ A stress benchmark for AI inference providers. Unlike academic quality benchmark
 
 ## Installation
 
+### Prerequisites
+- Python 3.10+
+- Virtual environment (strongly recommended)
+
+### Step-by-Step Setup
+
+**1. Create and activate virtual environment:**
 ```bash
-# From source (recommended during development)
+# Create venv (do this once)
+python3 -m venv .venv
+
+# Activate it
+# macOS/Linux:
+source .venv/bin/activate
+# Windows PowerShell:
+.venv\Scripts\Activate.ps1
+# Windows CMD:
+.venv\Scripts\activate.bat
+```
+
+**2. Install the package:**
+```bash
+# For development (includes all dependencies)
 pip install -e ".[all]"
 
-# Runtime only
+# Or install from PyPI
 pip install saturated-blitz-bench
+```
 
-# With dataset build tools (needed for build-dataset command)
-pip install saturated-blitz-bench[dataset]
+**3. Build dataset:**
+```bash
+# Quick dataset (100 prompts) for testing
+saturated-blitz-bench build-dataset --quick
+
+# Full dataset (5000 prompts) for production benchmarks
+saturated-blitz-bench build-dataset
+```
+
+**4. Test installation:**
+```bash
+saturated-blitz-bench run --dry-run
+```
+
+### Installing Without Virtual Environment
+While not recommended, you can install globally:
+```bash
+pip install saturated-blitz-bench
 ```
 
 ## Quick Start
@@ -219,3 +276,64 @@ Weights are configurable in the YAML config or by editing the distribution secti
 - Python 3.10+
 - An OpenAI-compatible inference endpoint (`/v1/chat/completions` with SSE streaming)
 - Works with: vLLM, TGI, SGLang, Triton, OpenAI API, any OpenAI-compatible proxy
+
+---
+
+## Troubleshooting
+
+### "command not found: saturated-blitz-bench"
+You forgot to activate the virtual environment:
+```bash
+source .venv/bin/activate  # macOS/Linux
+# or
+.venv\Scripts\activate    # Windows
+```
+
+### "No module named 'saturated_blitz_bench'"
+Install the package in development mode:
+```bash
+pip install -e ".[all]"
+```
+
+### "Dataset not found"
+Build the dataset first:
+```bash
+saturated-blitz-bench build-dataset --quick
+```
+
+### Virtual Environment Quick Reference
+
+**Activate:**
+- macOS/Linux: `source .venv/bin/activate`
+- Windows PowerShell: `.venv\Scripts\Activate.ps1`
+- Windows CMD: `.venv\Scripts\activate.bat`
+
+**Deactivate:**
+```bash
+deactivate
+```
+
+**Check if activated:**
+```bash
+which python  # Should show path to .venv/bin/python
+# or
+python -m pip list  # Should show installed packages
+```
+
+### Pro Tips
+
+1. **Auto-activate venv in your IDE:** Most IDEs (VS Code, PyCharm) can auto-activate the venv when you open the project.
+
+2. **Add to your shell config** (optional) to show venv status:
+   ```bash
+   # Add to ~/.bashrc or ~/.zshrc
+   export PS1="(venv) $PS1"
+   ```
+
+3. **Use direnv** (advanced): Automatically activate venv when entering the directory.
+
+4. **Make it a habit:** Always run `source .venv/bin/activate` after `cd` into the project.
+
+
+**Author:** Kimi 2.5
+**Human debugger** Arav :)
