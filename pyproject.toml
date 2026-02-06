@@ -1,0 +1,55 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "saturated-blitz-bench"
+version = "0.1.0"
+description = "AI inference provider stress benchmark — saturated concurrency, realistic workloads, streaming-first metrics"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [{ name = "saturated-blitz-bench contributors" }]
+keywords = ["benchmark", "llm", "inference", "stress-test", "throughput"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Testing",
+]
+
+dependencies = [
+    "httpx[http2]>=0.27",
+    "tiktoken>=0.7",
+    "pyyaml>=6.0",
+    "pydantic>=2.0",
+    "click>=8.0",
+    "jinja2>=3.1",
+    "rich>=13.0",
+]
+
+[project.optional-dependencies]
+dataset = [
+    "datasets>=2.19",
+    "tqdm>=4.66",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "respx>=0.21",
+]
+all = ["saturated-blitz-bench[dataset,dev]"]
+
+[project.scripts]
+saturated-blitz-bench = "saturated_blitz_bench.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/saturated_blitz_bench"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>saturated-blitz-bench Report — {{ config.endpoint.model }}</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+<style>
+  :root { --bg: #0d1117; --card: #161b22; --border: #30363d; --text: #e6edf3;
+           --muted: #8b949e; --green: #3fb950; --yellow: #d29922; --red: #f85149;
+           --blue: #58a6ff; --purple: #bc8cff; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+         background: var(--bg); color: var(--text); line-height: 1.5; padding: 2rem; }
+  h1 { font-size: 2rem; margin-bottom: 0.5rem; }
+  h2 { font-size: 1.4rem; margin: 2rem 0 1rem; border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; }
+  h3 { font-size: 1.1rem; margin: 1.5rem 0 0.5rem; color: var(--muted); }
+  .header { text-align: center; margin-bottom: 2rem; }
+  .header .subtitle { color: var(--muted); font-size: 0.95rem; }
+  .meta-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+               gap: 0.75rem; margin: 1rem 0; }
+  .meta-item { background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+               padding: 0.75rem 1rem; }
+  .meta-item .label { font-size: 0.8rem; color: var(--muted); text-transform: uppercase; }
+  .meta-item .value { font-size: 1.1rem; font-weight: 600; }
+  .summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+                  gap: 1rem; margin: 1rem 0; }
+  .summary-card { background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+                  padding: 1rem 1.25rem; }
+  .summary-card .metric-name { font-size: 0.85rem; color: var(--muted); }
+  .summary-card .metric-value { font-size: 1.8rem; font-weight: 700; }
+  .summary-card .metric-unit { font-size: 0.9rem; color: var(--muted); }
+  .rating-green { color: var(--green); }
+  .rating-yellow { color: var(--yellow); }
+  .rating-red { color: var(--red); }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
+  th, td { text-align: left; padding: 0.6rem 1rem; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-size: 0.85rem; text-transform: uppercase; font-weight: 600; }
+  td { font-variant-numeric: tabular-nums; }
+  .chart-container { background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+                     padding: 1.5rem; margin: 1rem 0; }
+  .chart-row { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  @media (max-width: 900px) { .chart-row { grid-template-columns: 1fr; } }
+  canvas { max-height: 350px; }
+  .footer { text-align: center; color: var(--muted); font-size: 0.8rem; margin-top: 3rem;
+            padding-top: 1rem; border-top: 1px solid var(--border); }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>saturated-blitz-bench</h1>
+  <div class="subtitle">AI Inference Provider Stress Benchmark</div>
+</div>
+
+<!-- Deployment Metadata -->
+<div class="meta-grid">
+  <div class="meta-item"><div class="label">Model</div><div class="value">{{ config.endpoint.model }}</div></div>
+  <div class="meta-item"><div class="label">Endpoint</div><div class="value">{{ config.endpoint.base_url }}</div></div>
+  {% if config.metadata.gpu_config %}<div class="meta-item"><div class="label">GPU Config</div><div class="value">{{ config.metadata.gpu_config }}</div></div>{% endif %}
+  {% if config.metadata.inference_engine %}<div class="meta-item"><div class="label">Engine</div><div class="value">{{ config.metadata.inference_engine }}</div></div>{% endif %}
+  {% if config.metadata.quantization %}<div class="meta-item"><div class="label">Quantization</div><div class="value">{{ config.metadata.quantization }}</div></div>{% endif %}
+  <div class="meta-item"><div class="label">Concurrency</div><div class="value">{{ config.test.max_concurrency }}</div></div>
+  <div class="meta-item"><div class="label">Duration</div><div class="value">{{ config.test.duration_seconds }}s</div></div>
+  <div class="meta-item"><div class="label">Timestamp</div><div class="value">{{ timestamp }}</div></div>
+</div>
+
+<!-- Executive Summary -->
+<h2>Executive Summary</h2>
+<div class="summary-grid">
+  <div class="summary-card">
+    <div class="metric-name">System Throughput</div>
+    <div class="metric-value">{{ "%.0f"|format(metrics.system_throughput_tps) }}</div>
+    <div class="metric-unit">output tok/s</div>
+  </div>
+  <div class="summary-card">
+    <div class="metric-name">Input Processing</div>
+    <div class="metric-value">{{ "{:,.0f}".format(metrics.input_throughput_tps) }}</div>
+    <div class="metric-unit">input tok/s</div>
+  </div>
+  {% if metrics.throughput_per_gpu %}
+  <div class="summary-card">
+    <div class="metric-name">Throughput per GPU</div>
+    <div class="metric-value">{{ "%.0f"|format(metrics.throughput_per_gpu) }}</div>
+    <div class="metric-unit">tok/s/GPU</div>
+  </div>
+  {% endif %}
+  <div class="summary-card">
+    <div class="metric-name">Avg TTFT</div>
+    <div class="metric-value">{{ "%.0f"|format((metrics.ttft.avg or 0) * 1000) }}</div>
+    <div class="metric-unit">ms</div>
+  </div>
+  <div class="summary-card">
+    <div class="metric-name">P99 TTFT</div>
+    <div class="metric-value">{{ "%.0f"|format((metrics.ttft.p99 or 0) * 1000) }}</div>
+    <div class="metric-unit">ms</div>
+  </div>
+  <div class="summary-card">
+    <div class="metric-name">Avg Output TPS</div>
+    <div class="metric-value">{{ "%.1f"|format(metrics.output_tps.avg or 0) }}</div>
+    <div class="metric-unit">tok/s per request</div>
+  </div>
+  <div class="summary-card">
+    <div class="metric-name">Total Requests</div>
+    <div class="metric-value">{{ "{:,}".format(metrics.total_requests) }}</div>
+    <div class="metric-unit">completed successfully</div>
+  </div>
+  <div class="summary-card">
+    <div class="metric-name">RPM</div>
+    <div class="metric-value">{{ "%.1f"|format(metrics.rpm) }}</div>
+    <div class="metric-unit">requests/min</div>
+  </div>
+  <div class="summary-card">
+    <div class="metric-name">Error Rate</div>
+    <div class="metric-value {% if metrics.error_rate < 0.01 %}rating-green{% elif metrics.error_rate < 0.05 %}rating-yellow{% else %}rating-red{% endif %}">{{ "%.1f"|format(metrics.error_rate * 100) }}%</div>
+    <div class="metric-unit">{{ metrics.failed_requests }} / {{ metrics.total_attempted }}</div>
+  </div>
+  <div class="summary-card">
+    <div class="metric-name">Effective Concurrency</div>
+    <div class="metric-value">{{ "%.1f"|format(effective_concurrency) }}</div>
+    <div class="metric-unit">/ {{ config.test.max_concurrency }}</div>
+  </div>
+  <div class="summary-card">
+    <div class="metric-name">Total Output Tokens</div>
+    <div class="metric-value">{{ "{:,}".format(metrics.total_output_tokens) }}</div>
+    <div class="metric-unit">generated</div>
+  </div>
+  <div class="summary-card">
+    <div class="metric-name">Total Input Tokens</div>
+    <div class="metric-value">{{ "{:,}".format(metrics.total_input_tokens) }}</div>
+    <div class="metric-unit">processed</div>
+  </div>
+  {% if metrics.tool_call_accuracy is not none %}
+  <div class="summary-card">
+    <div class="metric-name">Tool Call Accuracy</div>
+    <div class="metric-value">{{ "%.1f"|format(metrics.tool_call_accuracy * 100) }}%</div>
+    <div class="metric-unit">{{ metrics.tool_call_correct }} / {{ metrics.tool_call_total }}</div>
+  </div>
+  {% endif %}
+</div>
+
+<!-- Latency Tables -->
+<h2>Latency Distribution</h2>
+<table>
+  <tr><th>Metric</th><th>Avg</th><th>P50</th><th>P90</th><th>P95</th><th>P99</th></tr>
+  {% macro dist_row(name, d, multiplier=1, unit="", fmt="%.1f") %}
+  <tr>
+    <td>{{ name }}</td>
+    {% for key in ['avg','p50','p90','p95','p99'] %}
+    <td>{% if d[key] is not none %}{{ fmt|format(d[key] * multiplier) }}{{ unit }}{% else %}—{% endif %}</td>
+    {% endfor %}
+  </tr>
+  {% endmacro %}
+  {{ dist_row("TTFT", metrics.ttft, 1000, " ms") }}
+  {{ dist_row("E2E Latency", metrics.e2e_latency, 1000, " ms") }}
+  {{ dist_row("Output TPS", metrics.output_tps, 1, " tok/s") }}
+  {{ dist_row("ITL", metrics.itl, 1000, " ms") }}
+</table>
+
+<!-- Per-Category -->
+<h2>Per-Category Performance</h2>
+<table>
+  <tr><th>Category</th><th>Count</th><th>Avg Input Tok</th><th>Avg Output Tok</th><th>Avg TTFT (ms)</th><th>P95 TTFT (ms)</th><th>Avg TPS</th><th>Avg E2E (ms)</th></tr>
+  {% for cat, data in metrics.per_category.items() %}
+  <tr>
+    <td>{{ cat }}</td>
+    <td>{{ data.count }}</td>
+    <td>{{ "%.0f"|format(data.avg_input_tokens) }}</td>
+    <td>{{ "%.0f"|format(data.avg_output_tokens) }}</td>
+    <td>{% if data.ttft.avg is not none %}{{ "%.0f"|format(data.ttft.avg * 1000) }}{% else %}—{% endif %}</td>
+    <td>{% if data.ttft.p95 is not none %}{{ "%.0f"|format(data.ttft.p95 * 1000) }}{% else %}—{% endif %}</td>
+    <td>{% if data.output_tps.avg is not none %}{{ "%.1f"|format(data.output_tps.avg) }}{% else %}—{% endif %}</td>
+    <td>{% if data.e2e_latency.avg is not none %}{{ "%.0f"|format(data.e2e_latency.avg * 1000) }}{% else %}—{% endif %}</td>
+  </tr>
+  {% endfor %}
+</table>
+
+<!-- Charts -->
+<h2>Charts</h2>
+
+<div class="chart-row">
+  <div class="chart-container">
+    <canvas id="throughputChart"></canvas>
+  </div>
+  <div class="chart-container">
+    <canvas id="latencyChart"></canvas>
+  </div>
+</div>
+
+<div class="chart-row">
+  <div class="chart-container">
+    <canvas id="concurrencyChart"></canvas>
+  </div>
+  <div class="chart-container">
+    <canvas id="categoryChart"></canvas>
+  </div>
+</div>
+
+<div class="chart-row">
+  <div class="chart-container">
+    <canvas id="ttftScatterChart"></canvas>
+  </div>
+  <div class="chart-container">
+    <canvas id="ttftHistChart"></canvas>
+  </div>
+</div>
+
+<div class="footer">
+  Generated by <strong>saturated-blitz-bench v0.1.0</strong> — {{ timestamp }}
+</div>
+
+<script>
+Chart.defaults.color = '#8b949e';
+Chart.defaults.borderColor = '#30363d';
+const chartFont = { family: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" };
+
+// -- Data from Jinja --
+const tsData = {{ timeseries_json }};
+const concurrencyData = {{ concurrency_json }};
+const perCategory = {{ per_category_json }};
+const scatterData = {{ scatter_json }};
+
+// Throughput over time
+new Chart(document.getElementById('throughputChart'), {
+  type: 'line',
+  data: {
+    labels: tsData.map(d => (d.time_offset/60).toFixed(1)),
+    datasets: [{
+      label: 'Output Throughput (tok/s)',
+      data: tsData.map(d => d.throughput_tps),
+      borderColor: '#58a6ff',
+      backgroundColor: 'rgba(88,166,255,0.1)',
+      fill: true, tension: 0.3, pointRadius: 0,
+    }]
+  },
+  options: { plugins: { title: { display: true, text: 'System Throughput Over Time' } },
+             scales: { x: { title: { display: true, text: 'Time (min)' } },
+                       y: { title: { display: true, text: 'tok/s' }, beginAtZero: true } } }
+});
+
+// Latency over time (P50/P95)
+new Chart(document.getElementById('latencyChart'), {
+  type: 'line',
+  data: {
+    labels: tsData.map(d => (d.time_offset/60).toFixed(1)),
+    datasets: [
+      { label: 'TTFT P50 (ms)', data: tsData.map(d => d.ttft_p50 ? d.ttft_p50*1000 : null),
+        borderColor: '#3fb950', tension: 0.3, pointRadius: 0 },
+      { label: 'TTFT P95 (ms)', data: tsData.map(d => d.ttft_p95 ? d.ttft_p95*1000 : null),
+        borderColor: '#d29922', tension: 0.3, pointRadius: 0 },
+    ]
+  },
+  options: { plugins: { title: { display: true, text: 'Latency Over Time' } },
+             scales: { x: { title: { display: true, text: 'Time (min)' } },
+                       y: { title: { display: true, text: 'ms' }, beginAtZero: true } } }
+});
+
+// Concurrency over time
+new Chart(document.getElementById('concurrencyChart'), {
+  type: 'line',
+  data: {
+    labels: concurrencyData.map(d => (d.time/60).toFixed(1)),
+    datasets: [{
+      label: 'In-flight Requests',
+      data: concurrencyData.map(d => d.concurrency),
+      borderColor: '#bc8cff',
+      backgroundColor: 'rgba(188,140,255,0.15)',
+      fill: true, tension: 0.1, pointRadius: 0,
+    }]
+  },
+  options: { plugins: { title: { display: true, text: 'Concurrency Over Time' } },
+             scales: { x: { title: { display: true, text: 'Time (min)' } },
+                       y: { title: { display: true, text: 'Requests' }, beginAtZero: true } } }
+});
+
+// Per-category bar chart
+const cats = Object.keys(perCategory);
+new Chart(document.getElementById('categoryChart'), {
+  type: 'bar',
+  data: {
+    labels: cats,
+    datasets: [
+      { label: 'Avg TTFT (ms)', data: cats.map(c => perCategory[c].ttft.avg ? perCategory[c].ttft.avg*1000 : 0),
+        backgroundColor: '#58a6ff' },
+      { label: 'Avg TPS', data: cats.map(c => perCategory[c].output_tps.avg || 0),
+        backgroundColor: '#3fb950' },
+    ]
+  },
+  options: { plugins: { title: { display: true, text: 'Per-Category: TTFT vs TPS' } },
+             scales: { y: { beginAtZero: true } } }
+});
+
+// TTFT vs Input Tokens scatter
+new Chart(document.getElementById('ttftScatterChart'), {
+  type: 'scatter',
+  data: {
+    datasets: [{
+      label: 'TTFT vs Input Tokens',
+      data: scatterData.map(d => ({x: d.input_tokens, y: d.ttft * 1000})),
+      backgroundColor: 'rgba(88,166,255,0.5)', pointRadius: 3,
+    }]
+  },
+  options: { plugins: { title: { display: true, text: 'Input Tokens vs TTFT' } },
+             scales: { x: { title: { display: true, text: 'Input Tokens' } },
+                       y: { title: { display: true, text: 'TTFT (ms)' }, beginAtZero: true } } }
+});
+
+// TTFT histogram
+const ttftValues = scatterData.map(d => d.ttft * 1000).filter(v => v > 0).sort((a,b) => a-b);
+const binCount = 30;
+if (ttftValues.length > 0) {
+  const minV = ttftValues[0], maxV = ttftValues[ttftValues.length-1];
+  const binSize = (maxV - minV) / binCount || 1;
+  const bins = Array(binCount).fill(0);
+  const binLabels = [];
+  for (let i = 0; i < binCount; i++) binLabels.push(Math.round(minV + i * binSize));
+  ttftValues.forEach(v => { const idx = Math.min(Math.floor((v - minV) / binSize), binCount-1); bins[idx]++; });
+  new Chart(document.getElementById('ttftHistChart'), {
+    type: 'bar',
+    data: { labels: binLabels, datasets: [{ label: 'TTFT Distribution', data: bins,
+             backgroundColor: 'rgba(63,185,80,0.6)', borderColor: '#3fb950', borderWidth: 1 }] },
+    options: { plugins: { title: { display: true, text: 'TTFT Distribution (ms)' } },
+               scales: { x: { title: { display: true, text: 'TTFT (ms)' } },
+                         y: { title: { display: true, text: 'Count' }, beginAtZero: true } } }
+  });
+}
+</script>
+</body>
+</html>

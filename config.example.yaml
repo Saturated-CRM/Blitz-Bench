@@ -1,0 +1,42 @@
+# === Endpoint Configuration ===
+endpoint:
+  base_url: "http://localhost:8000/v1"    # OpenAI-compatible base URL
+  api_key: ""                              # Optional API key
+  model: "deepseek-ai/DeepSeek-V3"        # Model name for the request
+
+# === Test Parameters ===
+test:
+  max_concurrency: 64                      # Target concurrent requests
+  duration_seconds: 600                    # Test duration (default 10 min)
+  warmup_seconds: 30                       # Warm-up period (excluded from metrics)
+  request_timeout: 180                     # Per-request timeout (higher for long context)
+  temperature: 0.7                         # Sampling temperature
+
+# === Workload ===
+workload:
+  prompt_pool: "prompts/workload_pool.json"
+  distribution:                            # Override category weights (must sum to 1.0)
+    short_chat: 0.25
+    medium_chat: 0.15
+    tool_call: 0.20
+    code_generation: 0.10
+    long_context: 0.15
+    multi_turn: 0.10
+    reasoning: 0.05
+
+# === Report Metadata (informational only, shown in report) ===
+metadata:
+  deployment_name: "DeepSeek V3 FP8"
+  gpu_config: "8x H200 SXM"
+  gpu_count: 8                             # For throughput-per-GPU calculation
+  inference_engine: "vLLM 0.8.x"
+  quantization: "FP8"
+  tensor_parallel: 8
+  max_model_len: 131072
+  notes: "Production config, continuous batching enabled"
+
+# === Output ===
+output:
+  report_dir: "./reports"
+  format: "both"                           # html | json | both
+  include_raw_data: true                   # Save per-request CSV
